@@ -12,7 +12,7 @@ import type { CaseKind, CaseSlot, TypeCase } from '../types/case';
 import { CASE_KINDS, COL_RANGE, ROW_RANGE, describeCapacity, validateCaseInput } from '../types/case';
 import type { TypeMatrix } from '../types/matrix';
 import { suggestCaseCode } from '../utils/format';
-import { rcKey, slotAt, type RCCell } from '../utils/layout';
+import { cellLabel, rcKey, slotAt, type RCCell } from '../utils/layout';
 
 /** 字盘列表 + 新建字盘 */
 export default function CaseEditor() {
@@ -276,6 +276,16 @@ function CaseLayoutEditor({ typeCase }: { typeCase: TypeCase }) {
     const key = rcKey(row, col);
     setSelectedKey(key);
     if (pending) {
+      // 实物唯一占用：字模仍在别的字盘时阻止落位，提示先去原盘取出
+      const held = api.foreignHoldings.get(pending.matrix.id) ?? [];
+      if (held.length > 0) {
+        const where = held.map((h) => `${h.caseCode} 的 ${cellLabel(h.row, h.col)} 格`).join('、');
+        pushToast(
+          `「${pending.matrix.character}」（${pending.matrix.code}）仍占用字盘 ${where}，请先在原盘取出后再落位`,
+          'error',
+        );
+        return;
+      }
       api.place(pending.matrix, row, col);
       pushToast(
         `已在 ${rowLabel(row)}${col + 1} 落位「${pending.matrix.character}」（${pending.matrix.code}）`,
@@ -355,7 +365,7 @@ function CaseLayoutEditor({ typeCase }: { typeCase: TypeCase }) {
             />
             <div
               className={`rounded border px-3 py-2 text-xs ${
-                api.conflicts.hasConflict || api.capacity.overCapacity
+                api.conflicts.hasConflict || api.capacity.overCapacity || api.foreignConflicts.length > 0
                   ? 'border-seal/40 bg-seal-pale text-seal'
                   : 'border-paper-line bg-paper/50 text-ink-soft'
               }`}
@@ -376,6 +386,15 @@ function CaseLayoutEditor({ typeCase }: { typeCase: TypeCase }) {
                   ? ` · 越界格位 ${api.conflicts.outOfRange.join('、')}`
                   : ''}
               </p>
+              {api.foreignConflicts.length > 0 ? (
+                <p data-testid="foreign-conflict">
+                  实物唯一占用冲突：
+                  {api.foreignConflicts
+                    .map((f) => `「${f.character}」仍在 ${f.caseCode} 的 ${cellLabel(f.row, f.col)} 格`)
+                    .join('；')}
+                  ，保存将被阻止，请先在原盘取出。
+                </p>
+              ) : null}
               {api.dirty ? (
                 <p className="mt-1" data-testid="dirty-hint">
                   当前布局尚未保存到本机档案，点「保存布局」写回 IndexedDB。
@@ -407,21 +426,35 @@ function CaseLayoutEditor({ typeCase }: { typeCase: TypeCase }) {
                   </p>
                 ) : null}
                 <div className="flex flex-wrap gap-1">
-                  {charCandidates.map((m) => (
-                    <button
-                      key={m.id}
-                      type="button"
-                      data-testid={`candidate-matrix-${m.id}`}
-                      onClick={() => setPending({ matrix: m })}
-                      className={`rounded border px-2 py-1 text-[11px] transition ${
-                        pending?.matrix.id === m.id
-                          ? 'border-seal bg-seal text-paper'
-                          : 'border-paper-line bg-white text-ink-soft hover:border-seal'
-                      }`}
-                    >
-                      {m.character} · {m.code} · {m.sizeName}
-                    </button>
-                  ))}
+                  {charCandidates.map((m) => {
+                    const held = api.foreignHoldings.get(m.id) ?? [];
+                    const active = pending?.matrix.id === m.id;
+                    return (
+                      <button
+                        key={m.id}
+                        type="button"
+                        data-testid={`candidate-matrix-${m.id}`}
+                        onClick={() => setPending({ matrix: m })}
+                        className={`rounded border px-2 py-1 text-[11px] transition ${
+                          active
+                            ? 'border-seal bg-seal text-paper'
+                            : held.length > 0
+                              ? 'border-seal/50 bg-seal-pale/60 text-ink-soft hover:border-seal'
+                              : 'border-paper-line bg-white text-ink-soft hover:border-seal'
+                        }`}
+                      >
+                        {m.character} · {m.code} · {m.sizeName}
+                        {held.length > 0 ? (
+                          <span
+                            className={active ? 'ml-1' : 'ml-1 text-seal'}
+                            data-testid={`candidate-holding-${m.id}`}
+                          >
+                            在 {held.map((h) => `${h.caseCode}·${cellLabel(h.row, h.col)}`).join('、')}
+                          </span>
+                        ) : null}
+                      </button>
+                    );
+                  })}
                 </div>
                 {pending ? (
                   <p className="text-[11px] text-seal" data-testid="pending-hint">

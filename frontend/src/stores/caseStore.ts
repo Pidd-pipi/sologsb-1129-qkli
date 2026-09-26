@@ -3,7 +3,7 @@ import { db, ensureSeed } from '../db';
 import type { CaseInput, CaseSlot, TypeCase } from '../types/case';
 import { capacityOf } from '../types/case';
 import { makeId, toPlain } from '../utils/format';
-import { matrixIdsOf, validateCapacity } from '../utils/layout';
+import { cellLabel, findForeignOccupancy, matrixIdsOf, validateCapacity } from '../utils/layout';
 
 interface CaseState {
   cases: TypeCase[];
@@ -77,6 +77,14 @@ export const useCaseStore = create<CaseState>((set, get) => ({
     if (!current) throw new Error('未找到字盘');
     const check = validateCapacity(current.rows, current.cols, slots);
     if (check.overCapacity) throw new Error(check.message);
+    // 实物唯一占用：字模仍落在其他字盘时阻止本次保存，两个盘的已落库布局都不改动
+    const foreign = findForeignOccupancy(get().cases, id, slots);
+    if (foreign.length > 0) {
+      const detail = foreign
+        .map((f) => `「${f.character}」仍占用字盘 ${f.caseCode} 的 ${cellLabel(f.row, f.col)} 格`)
+        .join('；');
+      throw new Error(`${detail}，一枚字模只能落在一个字盘，请先在原盘取出后再保存`);
+    }
     const plainSlots = toPlain(slots);
     const next: Partial<TypeCase> = {
       slots: plainSlots,

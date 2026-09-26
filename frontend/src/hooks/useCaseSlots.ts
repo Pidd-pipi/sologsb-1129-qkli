@@ -3,13 +3,16 @@ import { useCaseStore } from '../stores/caseStore';
 import type { CaseSlot, TypeCase } from '../types/case';
 import type { TypeMatrix } from '../types/matrix';
 import {
+  collectForeignHoldings,
   detectConflicts,
   emptySlots,
   fillRate,
+  findForeignOccupancy,
   placeSlot,
   removeSlot,
   swapSlots,
   validateCapacity,
+  type ForeignOccupancy,
   type RCCell,
   type SlotConflicts,
 } from '../utils/layout';
@@ -24,6 +27,10 @@ export interface CaseSlotsApi {
   capacity: ReturnType<typeof validateCapacity>;
   fillPercent: number;
   emptyCells: RCCell[];
+  /** 其他字盘（已落库）中各字模的占用位置，按字模 id 索引 */
+  foreignHoldings: Map<string, ForeignOccupancy[]>;
+  /** 当前编辑布局与其他字盘（已落库）的实物占用冲突 */
+  foreignConflicts: ForeignOccupancy[];
   /** 落位：把一枚可用字模放到指定格位 */
   place: (matrix: TypeMatrix, row: number, col: number) => void;
   /** 取出格位上的字模 */
@@ -44,6 +51,7 @@ export interface CaseSlotsApi {
  */
 export function useCaseSlots(typeCase: TypeCase | undefined): CaseSlotsApi {
   const saveSlots = useCaseStore((s) => s.saveSlots);
+  const cases = useCaseStore((s) => s.cases);
   const [slots, setSlots] = useState<CaseSlot[]>(typeCase?.slots ?? []);
   const [saving, setSaving] = useState(false);
 
@@ -67,6 +75,14 @@ export function useCaseSlots(typeCase: TypeCase | undefined): CaseSlotsApi {
   const capacity = useMemo(() => validateCapacity(rows, cols, slots), [rows, cols, slots]);
   const fillPercent = useMemo(() => fillRate(slots, rows, cols), [slots, rows, cols]);
   const emptyCells = useMemo(() => emptySlots(rows, cols, slots), [rows, cols, slots]);
+  const foreignHoldings = useMemo(
+    () => collectForeignHoldings(cases, typeCase?.id ?? ''),
+    [cases, typeCase?.id],
+  );
+  const foreignConflicts = useMemo(
+    () => findForeignOccupancy(cases, typeCase?.id ?? '', slots),
+    [cases, typeCase?.id, slots],
+  );
 
   const place = useCallback((matrix: TypeMatrix, row: number, col: number) => {
     const slot: CaseSlot = {
@@ -109,6 +125,8 @@ export function useCaseSlots(typeCase: TypeCase | undefined): CaseSlotsApi {
     capacity,
     fillPercent,
     emptyCells,
+    foreignHoldings,
+    foreignConflicts,
     place,
     take,
     swap,

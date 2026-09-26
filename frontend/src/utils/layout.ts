@@ -1,4 +1,4 @@
-import type { CaseSlot } from '../types/case';
+import type { CaseSlot, TypeCase } from '../types/case';
 import { capacityOf } from '../types/case';
 
 /** 行列号与格位索引互算、字盘容量校验与冲突检测 */
@@ -11,6 +11,12 @@ export interface RCCell {
 /** 格位键：`行-列`（0 基） */
 export function rcKey(row: number, col: number): string {
   return `${row}-${col}`;
+}
+
+/** 格位标签：行用字母、列用 1 基数字，例：第 2 行第 3 列 → B3 */
+export function cellLabel(row: number, col: number): string {
+  const rowName = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'[row] ?? String(row + 1);
+  return `${rowName}${col + 1}`;
 }
 
 /** 解析格位键，非法返回 null */
@@ -159,4 +165,61 @@ export function fillRate(slots: CaseSlot[], rows: number, cols: number): number 
 /** 找出某字模在字盘中的格位 */
 export function findSlotsByMatrix(slots: CaseSlot[], matrixId: string): CaseSlot[] {
   return slots.filter((s) => s.matrixId === matrixId);
+}
+
+/** 字模在其他字盘（已落库）中的一处占用 */
+export interface ForeignOccupancy {
+  matrixId: string;
+  character: string;
+  caseId: string;
+  caseCode: string;
+  row: number;
+  col: number;
+}
+
+/** 汇总其他字盘（已落库）中各字模的占用位置，按字模 id 索引 */
+export function collectForeignHoldings(
+  cases: Array<Pick<TypeCase, 'id' | 'code' | 'slots'>>,
+  currentCaseId: string,
+): Map<string, ForeignOccupancy[]> {
+  const map = new Map<string, ForeignOccupancy[]>();
+  for (const c of cases) {
+    if (c.id === currentCaseId) continue;
+    for (const s of c.slots) {
+      if (!s.matrixId) continue;
+      const arr = map.get(s.matrixId) ?? [];
+      arr.push({
+        matrixId: s.matrixId,
+        character: s.character,
+        caseId: c.id,
+        caseCode: c.code,
+        row: s.row,
+        col: s.col,
+      });
+      map.set(s.matrixId, arr);
+    }
+  }
+  return map;
+}
+
+/**
+ * 实物唯一占用检查：待保存布局中的字模是否仍占用其他字盘（已落库）的格位。
+ * 同一字盘内的换位不受影响（跳过 currentCaseId 自身）。
+ */
+export function findForeignOccupancy(
+  cases: Array<Pick<TypeCase, 'id' | 'code' | 'slots'>>,
+  currentCaseId: string,
+  slots: CaseSlot[],
+): ForeignOccupancy[] {
+  const holdings = collectForeignHoldings(cases, currentCaseId);
+  const out: ForeignOccupancy[] = [];
+  const seen = new Set<string>();
+  for (const s of slots) {
+    if (!s.matrixId || seen.has(s.matrixId)) continue;
+    seen.add(s.matrixId);
+    const held = holdings.get(s.matrixId);
+    if (!held) continue;
+    for (const h of held) out.push({ ...h, character: s.character || h.character });
+  }
+  return out;
 }
