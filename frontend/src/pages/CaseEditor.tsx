@@ -6,7 +6,7 @@ import LayoutGrid from '../components/common/LayoutGrid';
 import { DRAFT_KEYS, useLocalDraft } from '../hooks/useLocalDraft';
 import { useCaseSlots } from '../hooks/useCaseSlots';
 import { useMatrixSearch } from '../hooks/useMatrixSearch';
-import { useCaseStore } from '../stores/caseStore';
+import { findForeignHolding, useCaseStore } from '../stores/caseStore';
 import { useUiStore } from '../stores/uiStore';
 import type { CaseKind, CaseSlot, TypeCase } from '../types/case';
 import { CASE_KINDS, COL_RANGE, ROW_RANGE, describeCapacity, validateCaseInput } from '../types/case';
@@ -232,6 +232,7 @@ interface PendingPlacement {
 
 function CaseLayoutEditor({ typeCase }: { typeCase: TypeCase }) {
   const pushToast = useUiStore((s) => s.pushToast);
+  const allCases = useCaseStore((s) => s.cases);
   const api = useCaseSlots(typeCase);
   const { results: candidateMatrices } = useMatrixSearch({ availability: ['可用'], ignoreKeyword: true });
   const [pickedChar, setPickedChar] = useState('');
@@ -255,6 +256,22 @@ function CaseLayoutEditor({ typeCase }: { typeCase: TypeCase }) {
     [candidateMatrices, pickedChar],
   );
 
+  /** 候选字模当前的实物占用：本盘格位 / 他盘格位（按落库布局） */
+  const holdingMap = useMemo(() => {
+    const map = new Map<string, { here: { row: number; col: number }[]; other: string[] }>();
+    for (const m of charCandidates) {
+      const here = typeCase.slots
+        .filter((s) => s.matrixId === m.id)
+        .map((s) => ({ row: s.row, col: s.col }));
+      const other = findForeignHolding(allCases, typeCase.id, m.id, m.character).map((h) => {
+        const cells = h.slots.map((s) => `${rowLabel(s.row)}${s.col + 1}`).join('、');
+        return `${h.typeCase.code} ${cells}`;
+      });
+      if (here.length || other.length) map.set(m.id, { here, other });
+    }
+    return map;
+  }, [charCandidates, allCases, typeCase]);
+
   const draftDiffers = useMemo(
     () => JSON.stringify(draft.slots) !== JSON.stringify(typeCase.slots),
     [draft.slots, typeCase.slots],
@@ -268,15 +285,22 @@ function CaseLayoutEditor({ typeCase }: { typeCase: TypeCase }) {
       ...api.conflicts.duplicatePositions,
       ...api.conflicts.outOfRange,
       ...api.conflicts.duplicateCharacters.flatMap((g) => g.keys),
+      ...api.foreignOccupancies.flatMap((h) =>
+        api.slots.filter((s) => s.matrixId === h.matrixId).map((s) => rcKey(s.row, s.col)),
+      ),
     ],
-    [api.conflicts],
+    [api.conflicts, api.foreignOccupancies, api.slots],
   );
 
   const handleSlotClick = (row: number, col: number) => {
     const key = rcKey(row, col);
     setSelectedKey(key);
     if (pending) {
-      api.place(pending.matrix, row, col);
+      const result = api.place(pending.matrix, row, col);
+      if (!result.ok) {
+        pushToast(result.reason ?? '该字模仍在其它字盘，不能重复落位', 'error');
+        return;
+      }
       pushToast(
         `已在 ${rowLabel(row)}${col + 1} 落位「${pending.matrix.character}」（${pending.matrix.code}）`,
       );
@@ -355,7 +379,7 @@ function CaseLayoutEditor({ typeCase }: { typeCase: TypeCase }) {
             />
             <div
               className={`rounded border px-3 py-2 text-xs ${
-                api.conflicts.hasConflict || api.capacity.overCapacity
+                api.conflicts.hasConflict || api.capacity.overCapacity || api.foreignOccupancies.length > 0
                   ? 'border-seal/40 bg-seal-pale text-seal'
                   : 'border-paper-line bg-paper/50 text-ink-soft'
               }`}
@@ -376,6 +400,18 @@ function CaseLayoutEditor({ typeCase }: { typeCase: TypeCase }) {
                   ? ` · 越界格位 ${api.conflicts.outOfRange.join('、')}`
                   : ''}
               </p>
+              {api.foreignOccupancies.length > 0 ? (
+                <p className="mt-1" data-testid="foreign-holding-warning">
+                  他盘占用 {api.foreignOccupancies.length} 枚，保存将被阻止：
+                  {api.foreignOccupancies
+                    .map((h) => {
+                      const cells = h.slots.map((s) => `${rowLabel(s.row)}${s.col + 1}`).join('、');
+                      return `「${h.character}」在 ${h.typeCase.code} ${cells}`;
+                    })
+                    .join('；')}
+                  。请先到原字盘取出并保存，再回到本盘落位。
+                </p>
+              ) : null}
               {api.dirty ? (
                 <p className="mt-1" data-testid="dirty-hint">
                   当前布局尚未保存到本机档案，点「保存布局」写回 IndexedDB。
@@ -407,26 +443,55 @@ function CaseLayoutEditor({ typeCase }: { typeCase: TypeCase }) {
                   </p>
                 ) : null}
                 <div className="flex flex-wrap gap-1">
-                  {charCandidates.map((m) => (
-                    <button
-                      key={m.id}
-                      type="button"
-                      data-testid={`candidate-matrix-${m.id}`}
-                      onClick={() => setPending({ matrix: m })}
-                      className={`rounded border px-2 py-1 text-[11px] transition ${
-                        pending?.matrix.id === m.id
-                          ? 'border-seal bg-seal text-paper'
-                          : 'border-paper-line bg-white text-ink-soft hover:border-seal'
-                      }`}
-                    >
-                      {m.character} · {m.code} · {m.sizeName}
-                    </button>
-                  ))}
+                  {charCandidates.map((m) => {
+                    const holding = holdingMap.get(m.id);
+                    const inOtherCase = Boolean(holding?.other.length);
+                    return (
+                      <button
+                        key={m.id}
+                        type="button"
+                        data-testid={`candidate-matrix-${m.id}`}
+                        onClick={() => setPending({ matrix: m })}
+                        className={`flex flex-col items-start rounded border px-2 py-1 text-[11px] transition ${
+                          pending?.matrix.id === m.id
+                            ? 'border-seal bg-seal text-paper'
+                            : inOtherCase
+                              ? 'border-brass/60 bg-brass-pale text-ink-soft hover:border-seal'
+                              : 'border-paper-line bg-white text-ink-soft hover:border-seal'
+                        }`}
+                      >
+                        <span>
+                          {m.character} · {m.code} · {m.sizeName}
+                        </span>
+                        {holding ? (
+                          <span
+                            className="mt-0.5 text-[10px]"
+                            data-testid={`candidate-holding-${m.id}`}
+                          >
+                            {holding.other.length
+                              ? `已在他盘：${holding.other.join('、')}`
+                              : `本盘：${holding.here.map((p) => `${rowLabel(p.row)}${p.col + 1}`).join('、')}`}
+                          </span>
+                        ) : null}
+                      </button>
+                    );
+                  })}
                 </div>
                 {pending ? (
-                  <p className="text-[11px] text-seal" data-testid="pending-hint">
-                    待落位：{pending.matrix.character}（{pending.matrix.code}），点击网格格位完成落位。
-                  </p>
+                  (() => {
+                    const holding = holdingMap.get(pending.matrix.id);
+                    return holding?.other.length ? (
+                      <p className="text-[11px] text-seal" data-testid="pending-hint">
+                        待落位：{pending.matrix.character}（{pending.matrix.code}）实物已在{' '}
+                        {holding.other.join('、')}
+                        ，需先在原字盘取出并保存，否则本盘不能落位、保存。
+                      </p>
+                    ) : (
+                      <p className="text-[11px] text-seal" data-testid="pending-hint">
+                        待落位：{pending.matrix.character}（{pending.matrix.code}），点击网格格位完成落位。
+                      </p>
+                    );
+                  })()
                 ) : (
                   <p className="text-[11px] text-ink-mute">先选字符与字模，再点网格落位。</p>
                 )}

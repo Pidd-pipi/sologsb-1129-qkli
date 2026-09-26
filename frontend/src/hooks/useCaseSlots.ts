@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useCaseStore } from '../stores/caseStore';
+import { findForeignHolding, foreignHoldings, useCaseStore, type ForeignHolding } from '../stores/caseStore';
 import type { CaseSlot, TypeCase } from '../types/case';
 import type { TypeMatrix } from '../types/matrix';
 import {
+  cellLabel,
   detectConflicts,
   emptySlots,
   fillRate,
@@ -14,6 +15,12 @@ import {
   type SlotConflicts,
 } from '../utils/layout';
 
+export interface PlaceResult {
+  ok: boolean;
+  /** 被原字盘占用而阻止落位时的说明 */
+  reason?: string;
+}
+
 export interface CaseSlotsApi {
   /** 当前编辑中的格位布局（可能尚未保存） */
   slots: CaseSlot[];
@@ -24,8 +31,10 @@ export interface CaseSlotsApi {
   capacity: ReturnType<typeof validateCapacity>;
   fillPercent: number;
   emptyCells: RCCell[];
-  /** 落位：把一枚可用字模放到指定格位 */
-  place: (matrix: TypeMatrix, row: number, col: number) => void;
+  /** 当前草稿中仍被其它字盘（落库版本）占用的字模，会阻止保存 */
+  foreignOccupancies: ForeignHolding[];
+  /** 落位：把一枚可用字模放到指定格位；若实物仍在他盘则阻止 */
+  place: (matrix: TypeMatrix, row: number, col: number) => PlaceResult;
   /** 取出格位上的字模 */
   take: (row: number, col: number) => void;
   /** 调换两个格位（目标为空时视为移动） */
@@ -44,6 +53,7 @@ export interface CaseSlotsApi {
  */
 export function useCaseSlots(typeCase: TypeCase | undefined): CaseSlotsApi {
   const saveSlots = useCaseStore((s) => s.saveSlots);
+  const cases = useCaseStore((s) => s.cases);
   const [slots, setSlots] = useState<CaseSlot[]>(typeCase?.slots ?? []);
   const [saving, setSaving] = useState(false);
 
@@ -67,17 +77,28 @@ export function useCaseSlots(typeCase: TypeCase | undefined): CaseSlotsApi {
   const capacity = useMemo(() => validateCapacity(rows, cols, slots), [rows, cols, slots]);
   const fillPercent = useMemo(() => fillRate(slots, rows, cols), [slots, rows, cols]);
   const emptyCells = useMemo(() => emptySlots(rows, cols, slots), [rows, cols, slots]);
+  const foreignOccupancies = useMemo(
+    () => (typeCase ? foreignHoldings(cases, typeCase.id, slots) : []),
+    [cases, slots, typeCase],
+  );
 
-  const place = useCallback((matrix: TypeMatrix, row: number, col: number) => {
-    const slot: CaseSlot = {
-      row,
-      col,
-      character: matrix.character,
-      matrixId: matrix.id,
-      placedAt: new Date().toISOString(),
-    };
-    setSlots((cur) => placeSlot(cur, slot));
-  }, []);
+  const place = useCallback(
+    (matrix: TypeMatrix, row: number, col: number): PlaceResult => {
+      // 实物唯一占用：仍在他盘落库布局中的字模不能落到本盘（原盘取出并保存后即可）
+      const held = findForeignHolding(cases, typeCase?.id ?? '', matrix.id, matrix.character);
+      if (held.length) return { ok: false, reason: describeHolding(held[0]) };
+      const slot: CaseSlot = {
+        row,
+        col,
+        character: matrix.character,
+        matrixId: matrix.id,
+        placedAt: new Date().toISOString(),
+      };
+      setSlots((cur) => placeSlot(cur, slot));
+      return { ok: true };
+    },
+    [cases, typeCase?.id],
+  );
 
   const take = useCallback((row: number, col: number) => {
     setSlots((cur) => removeSlot(cur, row, col));
@@ -109,6 +130,7 @@ export function useCaseSlots(typeCase: TypeCase | undefined): CaseSlotsApi {
     capacity,
     fillPercent,
     emptyCells,
+    foreignOccupancies,
     place,
     take,
     swap,
@@ -117,4 +139,10 @@ export function useCaseSlots(typeCase: TypeCase | undefined): CaseSlotsApi {
     save,
     revert,
   };
+}
+
+/** 单条他盘占用的落位阻止提示 */
+function describeHolding(h: ForeignHolding): string {
+  const cells = h.slots.map((s) => cellLabel(s.row, s.col)).join('、');
+  return `「${h.character}」实物仍在字盘 ${h.typeCase.code} 的 ${cells}，请先到原字盘取出并保存，再落位到新盘`;
 }

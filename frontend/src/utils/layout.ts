@@ -62,6 +62,12 @@ export function slotAt(slots: CaseSlot[], row: number, col: number): CaseSlot | 
   return slots.find((s) => s.row === row && s.col === col);
 }
 
+/** 格位的人读标签：行用字母 A、B…，列用 1 基数字，例：A1 / C12 */
+export function cellLabel(row: number, col: number): string {
+  const r = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'[row] ?? String(row + 1);
+  return `${r}${col + 1}`;
+}
+
 export interface DuplicateGroup {
   character: string;
   count: number;
